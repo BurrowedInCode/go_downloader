@@ -11,10 +11,13 @@ type mpbAdapter struct {
 }
 
 func (a *mpbAdapter) SetTotal(total int64) {
-	bar := a.progress.AddBar(total,
-		mpb.PrependDecorators(decor.Counters(decor.SizeB1024(0), "% .1f / % .1f")),
-		mpb.AppendDecorators(decor.Percentage()))
-	a.bar = bar
+	if total < 0 {
+		a.bar = a.progress.AddSpinner(0, mpb.PrependDecorators(decor.CurrentKibiByte("% .1f")))
+	} else {
+		a.bar = a.progress.AddBar(total,
+			mpb.PrependDecorators(decor.Counters(decor.SizeB1024(0), "% .1f / % .1f")),
+			mpb.AppendDecorators(decor.Percentage()))
+	}
 }
 
 func (a *mpbAdapter) Add(bytes int64) {
@@ -26,5 +29,8 @@ func (a *mpbAdapter) Abort() {
 		return
 	}
 	a.bar.Abort(false)
+}
 
+func (a *mpbAdapter) Complete() {
+	a.bar.SetTotal(-1, true)
 }

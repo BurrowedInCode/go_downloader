@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 )
 
 type recordingReporter struct {
@@ -23,6 +24,19 @@ func (r *recordingReporter) SetTotal(total int64) {
 
 func (r *recordingReporter) Add(bytes int64) {
 	r.added += bytes
+}
+
+type notifyingReporter struct {
+	written chan struct{}
+}
+
+func (r *notifyingReporter) SetTotal(int64) {}
+
+func (r *notifyingReporter) Add(int64) {
+	select {
+	case r.written <- struct{}{}:
+	default:
+	}
 }
 
 type noopReporter struct{}
@@ -218,5 +232,87 @@ func TestProgressWriterReportsWrittenBytes(t *testing.T) {
 
 	if !bytes.Equal(writer.Bytes(), payload) {
 		t.Errorf("written data = %q, want %q", writer.Bytes(), payload)
+	}
+}
+
+func TestDownloadWithUnknownContentLengthReportsBytesWritten(t *testing.T) {
+	payload := []byte("downloaded data")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	outputPath := filepath.Join(t.TempDir(), "file.txt")
+
+	reporter := &recordingReporter{}
+
+	err := Download(context.Background(), server.Client(), server.URL, outputPath, reporter)
+	if err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+
+	if reporter.total != -1 {
+		t.Errorf("got %d bytes, want -1", reporter.total)
+	}
+
+	want := int64(len(payload))
+	if reporter.added != want {
+		t.Errorf("reported bytes = %d, want %d", reporter.added, want)
+	}
+}
+
+func TestDownloadRemovesPartialFileWhenCanceling(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	payload := []byte("partial data")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
+		w.(http.Flusher).Flush()
+
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	defer cancel()
+
+	written := make(chan struct{}, 1)
+	reporter := &notifyingReporter{written: written}
+
+	outputPath := filepath.Join(t.TempDir(), "file.txt")
+
+	errChan := make(chan error, 1)
+
+	go func() {
+		err := Download(ctx, server.Client(), server.URL, outputPath, reporter)
+		errChan <- err
+	}()
+
+	select {
+	case <-written:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for download to write")
+	}
+
+	partPath := outputPath + ".part"
+
+	if _, err := os.Stat(partPath); err != nil {
+		t.Fatalf("partial file was not created: %v", err)
+	}
+
+	cancel()
+
+	select {
+	case err := <-errChan:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled got: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for download to stop")
+	}
+
+	if _, err := os.Stat(partPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected partial file to not exist got: %v", err)
 	}
 }
