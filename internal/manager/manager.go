@@ -43,8 +43,6 @@ func (m *Manager) Run(ctx context.Context, jobs []DownloadJob) []Result {
 		m.workers = 2
 	}
 
-	results := make([]Result, len(jobs))
-
 	jobsChannel := make(chan indexedJob)
 	resultsChannel := make(chan indexedResult, len(jobs))
 
@@ -81,6 +79,7 @@ func (m *Manager) Run(ctx context.Context, jobs []DownloadJob) []Result {
 		close(resultsChannel)
 	}()
 
+	results := make([]Result, len(jobs))
 	received := make([]bool, len(jobs))
 
 	for result := range resultsChannel {
