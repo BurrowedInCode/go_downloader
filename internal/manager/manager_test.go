@@ -114,6 +114,92 @@ func TestRunDownloadsConcurrently(t *testing.T) {
 	}
 }
 
+func TestRunWorkerPools(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan DownloadJob, 2)
+		release := make(chan struct{})
+
+		job1 := DownloadJob{
+			OutputPath: filepath.Join(t.TempDir(), "file.txt"),
+			URL:        "https://example.com/file.txt"}
+		job2 := DownloadJob{
+			OutputPath: filepath.Join(t.TempDir(), "file1.txt"),
+			URL:        "https://example.com/file1.txt"}
+		job3 := DownloadJob{
+			OutputPath: filepath.Join(t.TempDir(), "file2.txt"),
+			URL:        "https://example.com/file2.txt"}
+		job4 := DownloadJob{
+			OutputPath: filepath.Join(t.TempDir(), "file3.txt"),
+			URL:        "https://example.com/file3.txt"}
+		job5 := DownloadJob{
+			OutputPath: filepath.Join(t.TempDir(), "file4.txt"),
+			URL:        "https://example.com/file4.txt"}
+
+		jobs := []DownloadJob{job1, job2, job3, job4, job5}
+
+		downloadFunc := func(ctx context.Context, job DownloadJob) error {
+			started <- job
+
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+
+		manager := NewManager(2, downloadFunc)
+
+		go func() {
+			manager.Run(ctx, jobs)
+			close(done)
+		}()
+
+		t.Cleanup(func() {
+			cancel()
+
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Error("Run did not stop after cancellation")
+			}
+		})
+
+		<-started
+		<-started
+
+		synctest.Wait()
+
+		select {
+		case <-started:
+			t.Fatal("extra job started while both workers were occupied")
+		default:
+		}
+
+		release <- struct{}{}
+
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("expected new job to start")
+		}
+
+		close(release)
+
+		<-started
+		<-started
+
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("Run did not finish after releasing downloads")
+		}
+	})
+}
+
 func TestRunReturnsResultsInOrder(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		started := make(chan DownloadJob, 2)
