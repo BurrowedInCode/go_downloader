@@ -116,6 +116,7 @@ func TestRunDownloadsConcurrently(t *testing.T) {
 
 func TestRunWorkerPools(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
+
 		started := make(chan DownloadJob, 2)
 		release := make(chan struct{})
 
@@ -189,8 +190,13 @@ func TestRunWorkerPools(t *testing.T) {
 
 		close(release)
 
-		<-started
-		<-started
+		for i := 0; i < 2; i++ {
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for two downloads to start")
+			}
+		}
 
 		select {
 		case <-done:
@@ -283,4 +289,75 @@ func TestRunReturnsResultsInOrder(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestRunExitsOnCancel(t *testing.T) {
+	started := make(chan DownloadJob, 2)
+	release := make(chan struct{})
+
+	job1 := DownloadJob{
+		OutputPath: filepath.Join(t.TempDir(), "file.txt"),
+		URL:        "https://example.com/file.txt"}
+	job2 := DownloadJob{
+		OutputPath: filepath.Join(t.TempDir(), "file1.txt"),
+		URL:        "https://example.com/file1.txt"}
+
+	jobs := []DownloadJob{job1, job2}
+
+	downloadFunc := func(ctx context.Context, job DownloadJob) error {
+		started <- job
+
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	manager := NewManager(2, downloadFunc)
+
+	var results []Result
+
+	go func() {
+		results = manager.Run(ctx, jobs)
+		close(done)
+	}()
+
+	t.Cleanup(func() {
+		cancel()
+
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("Run did not stop after cancellation")
+		}
+	})
+
+	for i := 0; i < len(jobs); i++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for downloads to start")
+		}
+	}
+
+	cancel()
+
+	select {
+	case <-done:
+		if len(results) != len(jobs) {
+			t.Fatalf("expected %d results, got %d", len(jobs), len(results))
+		}
+		for i, v := range results {
+			if !errors.Is(v.Err, context.Canceled) {
+				t.Fatalf("expected cancellation at %v, got %v", i, v.Err)
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not finish after cancellation")
+	}
 }
